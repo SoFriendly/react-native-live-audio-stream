@@ -15,8 +15,13 @@ RCT_EXPORT_METHOD(init:(NSDictionary *) options) {
     _recordState.mDataFormat.mReserved          = 0;
     _recordState.mDataFormat.mFormatID          = kAudioFormatLinearPCM;
     _recordState.mDataFormat.mFormatFlags       = _recordState.mDataFormat.mBitsPerChannel == 8 ? kLinearPCMFormatFlagIsPacked : (kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked);
+    
     _recordState.bufferByteSize                 = options[@"bufferSize"] == nil ? 2048 : [options[@"bufferSize"] unsignedIntValue];
     _recordState.mSelf = self;
+    
+    NSString *fileName = options[@"wavFile"] == nil ? @"audio.wav" : options[@"wavFile"];
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    _filePath = [NSString stringWithFormat:@"%@/%@", docDir, fileName];
 }
 
 RCT_EXPORT_METHOD(start) {
@@ -24,15 +29,15 @@ RCT_EXPORT_METHOD(start) {
     AVAudioSession *audioSession = [AVAudioSession sharedInstance];
     NSError *error = nil;
     BOOL success;
-
     // Apple recommended:
     // Instead of setting your category and mode properties independently, set them at the same time
     if (@available(iOS 10.0, *)) {
         success = [audioSession setCategory: AVAudioSessionCategoryPlayAndRecord
                                        mode: AVAudioSessionModeVoiceChat
                                     options: AVAudioSessionCategoryOptionDuckOthers |
-                                             AVAudioSessionCategoryOptionAllowBluetooth |
-                                             AVAudioSessionCategoryOptionAllowAirPlay
+                   AVAudioSessionCategoryOptionAllowBluetooth |
+                   AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+                   AVAudioSessionCategoryOptionAllowAirPlay
                                       error: &error];
     } else {
         success = [audioSession setCategory: AVAudioSessionCategoryPlayAndRecord withOptions: AVAudioSessionCategoryOptionDuckOthers error: &error];
@@ -42,15 +47,20 @@ RCT_EXPORT_METHOD(start) {
         RCTLog(@"[RNLiveAudioStream] Problem setting up AVAudioSession category and mode. Error: %@", error);
         return;
     }
-
     _recordState.mIsRunning = true;
-
+    _recordState.mIsPaused = false;
+    _recordState.mCurrentPacket = 0;
+        
+        CFURLRef url = CFURLCreateWithString(kCFAllocatorDefault, (CFStringRef)_filePath, NULL);
+        AudioFileCreateWithURL(url, kAudioFileWAVEType, &_recordState.mDataFormat, kAudioFileFlags_EraseFile, &_recordState.mAudioFile);
+        CFRelease(url);
+    
     OSStatus status = AudioQueueNewInput(&_recordState.mDataFormat, HandleInputBuffer, &_recordState, NULL, NULL, 0, &_recordState.mQueue);
     if (status != 0) {
         RCTLog(@"[RNLiveAudioStream] Record Failed. Cannot initialize AudioQueueNewInput. status: %i", (int) status);
         return;
     }
-
+    
     for (int i = 0; i < kNumberBuffers; i++) {
         AudioQueueAllocateBuffer(_recordState.mQueue, _recordState.bufferByteSize, &_recordState.mBuffers[i]);
         AudioQueueEnqueueBuffer(_recordState.mQueue, _recordState.mBuffers[i], 0, NULL);
@@ -58,16 +68,47 @@ RCT_EXPORT_METHOD(start) {
     AudioQueueStart(_recordState.mQueue, NULL);
 }
 
-RCT_EXPORT_METHOD(stop) {
+RCT_EXPORT_METHOD(pause) {
+    if (_recordState.mIsRunning) {
+        if (!_recordState.mIsPaused) {
+            OSStatus status = AudioQueuePause(_recordState.mQueue);
+            if (status == noErr) {
+                _recordState.mIsPaused = true;
+            }
+        }
+    }
+}
+
+RCT_EXPORT_METHOD(resume) {
+    if (_recordState.mIsRunning) {
+        if (_recordState.mIsPaused) {
+            OSStatus status = AudioQueueStart(_recordState.mQueue, NULL);
+            if (status == noErr) {
+                _recordState.mIsPaused = false;
+            }
+        }
+    }
+}
+
+
+RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
+                  rejecter:(__unused RCTPromiseRejectBlock)reject) {
     RCTLogInfo(@"[RNLiveAudioStream] stop");
     if (_recordState.mIsRunning) {
         _recordState.mIsRunning = false;
+        _recordState.mIsPaused = false;
+
         AudioQueueStop(_recordState.mQueue, true);
+        AudioQueueDispose(_recordState.mQueue, true);
+        AudioFileClose(_recordState.mAudioFile);
         for (int i = 0; i < kNumberBuffers; i++) {
             AudioQueueFreeBuffer(_recordState.mQueue, _recordState.mBuffers[i]);
         }
-        AudioQueueDispose(_recordState.mQueue, true);
     }
+     resolve(_filePath);
+        unsigned long long fileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:_filePath error:nil] fileSize];
+        RCTLogInfo(@"file path %@", _filePath);
+        RCTLogInfo(@"file size %llu", fileSize);
 }
 
 void HandleInputBuffer(void *inUserData,
@@ -77,9 +118,20 @@ void HandleInputBuffer(void *inUserData,
                        UInt32 inNumPackets,
                        const AudioStreamPacketDescription *inPacketDesc) {
     AQRecordState* pRecordState = (AQRecordState *)inUserData;
-
+    
     if (!pRecordState->mIsRunning) {
         return;
+    }
+    
+    if (AudioFileWritePackets(pRecordState->mAudioFile,
+                              false,
+                              inBuffer->mAudioDataByteSize,
+                              inPacketDesc,
+                              pRecordState->mCurrentPacket,
+                              &inNumPackets,
+                              inBuffer->mAudioData
+                              ) == noErr) {
+        pRecordState->mCurrentPacket += inNumPackets;
     }
 
     short *samples = (short *) inBuffer->mAudioData;
@@ -87,7 +139,7 @@ void HandleInputBuffer(void *inUserData,
     NSData *data = [NSData dataWithBytes:samples length:nsamples];
     NSString *str = [data base64EncodedStringWithOptions:0];
     [pRecordState->mSelf sendEventWithName:@"data" body:str];
-
+    
     AudioQueueEnqueueBuffer(pRecordState->mQueue, inBuffer, 0, NULL);
 }
 

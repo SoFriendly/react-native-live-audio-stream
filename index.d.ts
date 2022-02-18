@@ -2,6 +2,8 @@ declare module "react-native-live-audio-stream" {
   export interface IAudioRecord {
     init: (options: Options) => void
     start: () => void
+    pause: () => void
+    resume: () => void
     stop: () => Promise<string>
     on: (event: "data", callback: (data: string) => void) => void
   }
