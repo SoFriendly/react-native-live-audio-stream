@@ -4,8 +4,8 @@ declare module "react-native-live-audio-stream" {
     start: () => void
     pause: () => void
     resume: () => void
-    stop: () => Promise<string>
-    on: (event: "data", callback: (data: string) => void) => void
+    stop: () => Promise<{filePath: string, duration: number, durationText: string}>
+    on: (event: "data", callback: (data: string, duration: number, durationText: string ) => void) => void
   }
 
   export interface Options {

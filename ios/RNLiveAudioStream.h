@@ -19,5 +19,8 @@ typedef struct {
 @interface RNLiveAudioStream: RCTEventEmitter <RCTBridgeModule>
 @property (nonatomic, assign) AQRecordState recordState;
 @property (nonatomic, strong) NSString* filePath;
+@property (nonatomic, strong) NSTimer *timer;
+@property (nonatomic) int seconds;
+@property (nonatomic, strong) NSString* durationText;
 
 @end
